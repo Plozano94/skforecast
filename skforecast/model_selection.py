@@ -228,6 +228,12 @@ def cv_forecaster(forecaster, y: Union[np.ndarray, pd.Series],
     '''
     
     forecaster._check_y(y=y)
+    
+    if isinstance(y, pd.Series):
+        index = y.index.copy()
+    else:
+        index = pd.Index(np.arange(len(y)))
+        
     y = forecaster._preproces_y(y=y)
     
     if exog is not None:
@@ -293,6 +299,10 @@ def cv_forecaster(forecaster, y: Union[np.ndarray, pd.Series],
     if cv_predictions and cv_metrics:
         cv_predictions = np.concatenate(cv_predictions)
         cv_metrics = np.array(cv_metrics)
+        cv_predictions = pd.Series(
+                            data  = cv_predictions,
+                            index = index[initial_train_size:initial_train_size + len(cv_predictions)]
+                         )
     else:
         cv_predictions = np.array([])
         cv_metrics = np.array([])
@@ -364,6 +374,12 @@ def backtesting_forecaster(forecaster, y: Union[np.ndarray, pd.Series],
     '''
     
     forecaster._check_y(y=y)
+    
+    if isinstance(y, pd.Series):
+        index = y.index.copy()
+    else:
+        index = pd.Index(np.arange(len(y)))
+        
     y = forecaster._preproces_y(y=y)
     
     if exog is not None:
@@ -484,7 +500,7 @@ def backtesting_forecaster(forecaster, y: Union[np.ndarray, pd.Series],
         
         backtest_predictions.append(pred)
     
-    backtest_predictions = np.concatenate(backtest_predictions)
+    backtest_predictions = np.concatenate(backtest_predictions)                      
     metric_value = metric(
                         y_true = y[initial_train_size: initial_train_size + len(backtest_predictions)],
                         y_pred = backtest_predictions
@@ -495,6 +511,11 @@ def backtesting_forecaster(forecaster, y: Union[np.ndarray, pd.Series],
             forecaster.set_out_sample_residuals(
                 y[initial_train_size: initial_train_size + len(backtest_predictions)] - backtest_predictions
             )
+            
+    backtest_predictions = pd.Series(
+                            data  = backtest_predictions,
+                            index = index[initial_train_size:initial_train_size + len(backtest_predictions)]
+                           )
 
     return np.array([metric_value]), backtest_predictions
 
@@ -743,6 +764,12 @@ def backtesting_forecaster_intervals(
     '''
     
     forecaster._check_y(y=y)
+    
+    if isinstance(y, pd.Series):
+        index = y.index.copy()
+    else:
+        index = pd.Index(np.arange(len(y)))
+        
     y = forecaster._preproces_y(y=y)
     
     if exog is not None:
@@ -859,5 +886,11 @@ def backtesting_forecaster_intervals(
             forecaster.set_out_sample_residuals(
                 y[initial_train_size: initial_train_size + len(backtest_predictions)] - backtest_predictions[:, 0]
             )
+            
+    backtest_predictions = pd.DataFrame(
+                            data  = backtest_predictions,
+                            columns = ['pred', 'lower_bound', 'upper_bound'],
+                            index = index[initial_train_size:initial_train_size + len(backtest_predictions)]
+                           )
 
     return np.array([metric_value]), backtest_predictions
