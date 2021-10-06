@@ -67,6 +67,12 @@ class ForecasterAutoreg():
         values needed to calculate the lags used to predict the next `step`
         after the training data.
         
+    last_window_index : pd.Index
+        Pandas index of last_window. It allows to propagate the index in predictions.
+        
+    y_index : pd.Index
+        Pandas index for y. It allows to propagate the index in predictions.
+        
     included_exog : bool
         If the forecaster has been trained using exogenous variable/s.
         
@@ -93,6 +99,8 @@ class ForecasterAutoreg():
         
         self.regressor            = regressor
         self.last_window          = None
+        self.last_window_index    = None
+        self.y_index              = None
         self.included_exog        = False
         self.exog_type            = None
         self.exog_shape           = None
@@ -274,6 +282,7 @@ class ForecasterAutoreg():
         self.exog_shape    = None
         
         self._check_y(y=y)
+        self._get_index_y(y=y)
         y = self._preproces_y(y=y)
         
         if exog is not None:
@@ -303,7 +312,7 @@ class ForecasterAutoreg():
         # The last time window of training data is stored so that lags needed as
         # predictors in the first iteration of `predict()` can be calculated.
         self.last_window = y_train[-self.max_lag:].copy()
-        
+        self.last_window_index = self.y_index[-self.max_lag:].copy()
             
     def predict(self, steps: int, last_window: Union[np.ndarray, pd.Series]=None,
                 exog: Union[np.ndarray, pd.Series, pd.DataFrame]=None) -> np.ndarray:
@@ -811,6 +820,31 @@ class ForecasterAutoreg():
             return y.to_numpy(copy=True)
         else:
             return y
+        
+        
+    def _get_index_y(self, y: Union[np.ndarray, pd.Series]) -> None:
+        
+        '''
+        If `y` is `pd.Series` and it's index is pd.DatetimeIndex, store a copy of the
+        index, else, create a numeric index.
+        
+        Parameters
+        ----------        
+        y :1D np.ndarray, pd.Series
+            Time series values
+
+        Returns 
+        -------
+        None
+        '''
+        
+        if isinstance(y, pd.Series):
+            if isinstance(y.index, pd.DatetimeIndex):
+                self.y_index=y.index.copy()
+            else:
+                self.y_index=pd.Index(np.arange(len(y)))
+        else:
+            self.y_index=pd.Index(np.arange(len(y)))
             
         
     def _preproces_last_window(self, last_window: Union[np.ndarray, pd.Series]) -> np.ndarray:
