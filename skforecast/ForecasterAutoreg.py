@@ -68,7 +68,7 @@ class ForecasterAutoreg():
         after the training data.
         
     last_window_index : pd.Index
-        Pandas index of last_window. It allows to propagate the index in predictions.
+        Pandas index for last_window of y. It allows to propagate the index in predictions.
         
     y_index : pd.Index
         Pandas index for y. It allows to propagate the index in predictions.
@@ -377,6 +377,7 @@ class ForecasterAutoreg():
      
         if last_window is not None:
             self._check_last_window(last_window=last_window)
+            last_window_index = self._get_index_last_window(last_window=last_window)
             last_window = self._preproces_last_window(last_window=last_window)
             if last_window.shape[0] < self.max_lag:
                 raise Exception(
@@ -385,6 +386,7 @@ class ForecasterAutoreg():
                 )
         else:
             last_window = self.last_window.copy()
+            last_window_index = self.last_window_index.copy()
             
         predictions = np.full(shape=steps, fill_value=np.nan)
 
@@ -401,6 +403,12 @@ class ForecasterAutoreg():
             # Update `last_window` values. The first position is discarded and 
             # the new prediction is added at the end.
             last_window = np.append(last_window[1:], prediction)
+            
+        
+        predictions = pd.Series(
+                        data  = predictions,
+                        index = self._expand_index(last_window_index=last_window_index, steps=steps)
+                      )
 
         return predictions
     
@@ -838,14 +846,80 @@ class ForecasterAutoreg():
         None
         '''
         
-        if isinstance(y, pd.Series):
-            if isinstance(y.index, pd.DatetimeIndex):
-                self.y_index=y.index.copy()
-            else:
-                self.y_index=pd.Index(np.arange(len(y)))
+        if isinstance(y, pd.Series) and isinstance(y.index, pd.DatetimeIndex):
+            self.y_index = y.index.copy()
         else:
-            self.y_index=pd.Index(np.arange(len(y)))
+            self.y_index = pd.RangeIndex(
+                                    start = 0,
+                                    stop  = len(y),
+                                    step  = 1
+                               )
             
+    def _get_index_last_window(self, last_window: Union[np.ndarray, pd.Series]) -> pd.Index:
+        
+        '''
+        If `y` is `pd.Series` and it's index is pd.DatetimeIndex, store a copy of the
+        index, else, create a numeric index.
+        
+        Parameters
+        ----------        
+        last_window :1D np.ndarray, pd.Series
+            Time series values
+
+        Returns 
+        -------
+        last_window_index : pd.Index
+        '''
+        
+        if isinstance(last_window, pd.Series) and isinstance(last_window.index, pd.DatetimeIndex):
+            last_window_index = last_window.index.copy()
+        else:
+            last_window_index = pd.RangeIndex(
+                                    start = 0,
+                                    stop  = len(last_window),
+                                    step  = 1
+                                )
+            
+        return last_window_index
+
+            
+    def _expand_index(self, last_window_index: Union[pd.Index, None], steps: int) -> pd.Index:
+        
+        '''
+        Create a new index of lenght `steps` starting and the end of last_window_index.
+        
+        Parameters
+        ----------        
+        y : pd.Index, None
+            Index of last window
+        steps: int
+            Number of steps to expand.
+
+        Returns 
+        -------
+        index : pd.Index
+        '''
+        
+        if isinstance(last_window_index, pd.Index):
+            
+            if isinstance(last_window_index, pd.DatetimeIndex):
+                index = pd.date_range(
+                            last_window_index[-1] + last_window_index.freq,
+                            periods = steps,
+                            freq    = last_window_index.freq
+                        )
+            elif isinstance(last_window_index, pd.RangeIndex):
+                index = pd.RangeIndex(
+                            start = last_window_index[-1] + 1,
+                            stop  = last_window_index[-1] + 1 + steps
+                         )
+        else: 
+            index = pd.RangeIndex(
+                            start = 0,
+                            stop  = steps
+                         )
+        return index
+    
         
     def _preproces_last_window(self, last_window: Union[np.ndarray, pd.Series]) -> np.ndarray:
         
