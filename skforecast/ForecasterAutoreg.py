@@ -1,4 +1,4 @@
-################################################################################
+ ################################################################################
 #                               skforecast                                     #
 #                                                                              #
 # This work by Joaquín Amat Rodrigo is licensed under a Creative Commons       #
@@ -71,6 +71,9 @@ class ForecasterAutoreg():
     y_index_freq : str
         Index frequency of the input time series used in training.
         
+    training_range: pd.Index
+        First and last index of samples used during training.
+        
     last_window : pd.Series
         Last window the forecaster has seen during trained. It stores the
         values needed to calculate the lags used to predict the next `step`
@@ -81,9 +84,9 @@ class ForecasterAutoreg():
         
     exog_type : type
         Type of exogenous variable/s used in training.
-            
-    exog_shape : tuple
-        Shape of exogenous variable/s used in training.
+        
+    exog_col_names : tuple
+        Column names of exog if exog used in training is a pandas DataFrame.
         
     in_sample_residuals: np.ndarray
         Residuals of the model when predicting training data. Only stored up to
@@ -92,9 +95,6 @@ class ForecasterAutoreg():
     out_sample_residuals: np.ndarray
         Residuals of the model when predicting non training data. Only stored
         up to 1000 values.
-
-    training_range: pd.Index
-        First and last index of samples used during training.
      
     '''
     
@@ -103,14 +103,15 @@ class ForecasterAutoreg():
         self.regressor            = regressor
         self.y_index_type         = None
         self.y_index_freq         = None
+        self.training_range       = None
         self.last_window          = None
         self.included_exog        = False
         self.exog_type            = None
-        self.exog_shape           = None
+        self.exog_col_names       = None
         self.in_sample_residuals  = None
         self.out_sample_residuals = None
         self.fitted               = False
-        self.training_range       = None
+        
 
         
         if isinstance(lags, int) and lags < 1:
@@ -148,8 +149,8 @@ class ForecasterAutoreg():
             f"Lags: {self.lags} \n"
             f"Window size: {self.window_size} \n"
             f"Exogenous variable: {self.included_exog}, {self.exog_type} \n"
-            f"Training range: {self.training_range} \n"
-            f"Training index type: {self.y_index_type} \n"
+            f"Training range: {self.training_range.to_list()} \n"
+            f"Training index type: {str(self.y_index_type)} \n"
             f"Training index frequancy: {self.y_index_freq} \n"
             f"Parameters: {self.regressor.get_params()} \n"
         )
@@ -157,9 +158,9 @@ class ForecasterAutoreg():
         return info
     
     
-    def _create_lags(self, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _create_lags(self, y: pd.Series) -> Tuple[np.ndarray, np.ndarray]:
         '''       
-        Transforms a 1D array into a 2D array (lags) and a 1D array (`y`).
+        Transforms a pandas Series into a 2D array (lags) and a 1D array (`y`).
         Each value of `y` is associated with the lags that precede it.
         
         Notice that, the returned matrix X_data, contains the lag 1 in the first
@@ -167,7 +168,7 @@ class ForecasterAutoreg():
         
         Parameters
         ----------        
-        y : np.ndarray
+        y : pandas.Series
             Values of a time series.
 
         Returns 
@@ -185,35 +186,52 @@ class ForecasterAutoreg():
                 f"Maximum lag can't be higher than `y` length. "
                 f"Got maximum lag={self.max_lag} and `y` length={len(y)}."
             )
-            
+        
         n_splits = len(y) - self.max_lag
-        X_data   = np.full(shape=(n_splits, self.max_lag), fill_value=np.nan, dtype=float)
-        y_data   = np.full(shape=(n_splits, 1), fill_value=np.nan, dtype= float)
+        X_data = pd.DataFrame(
+                    data = np.full(
+                            shape = (n_splits, self.max_lag),
+                            fill_value = np.nan,
+                            dtype = float
+                            ),
+                    columns = [f"lag_{i}" for i in self.lags[::-1]],
+                    index = y.index[self.max_lag:]
+                )
+        y_data = pd.Series(
+                    data = np.full(
+                            shape = n_splits,
+                            fill_value = np.nan,
+                            dtype = float
+                           ),
+                    index = y.index[self.max_lag:],
+                    name = 'y'
+                 )
 
         for i in range(n_splits):
             X_index = np.arange(i, self.max_lag + i)
             y_index = [self.max_lag + i]
-
-            X_data[i, :] = y[X_index]
-            y_data[i]    = y[y_index]
+            X_data.iloc[i, :] = y.iloc[X_index]
+            y_data.iloc[i]    = y.iloc[y_index]
             
-        X_data = X_data[:, -self.lags]
-        y_data = y_data.ravel()
+        X_data = X_data.iloc[:, -self.lags]
             
         return X_data, y_data
 
 
-    def _create_train_X_y(self, y: np.ndarray, exog: np.ndarray=None
-                         ) -> Tuple[np.array, np.array]:
+    def _create_train_X_y(
+        self,
+        y: pd.Series,
+        exog: Union[pd.Series, pd.DataFrame]=None
+    ) -> Tuple[np.array, np.array]:
         '''
-        Create training matrices X, y from a time series.
+        Create training matrices X, y from univariante time series.
         
         Parameters
         ----------        
-        y : 1D np.ndarray
+        y : pd.Series
             Values of a time series.
             
-        exog : np.ndarray, default `None`
+        exog : pd.Series, pd.DataFrame, default `None`
             Exogenous variable/s included as predictor/s. Must have the same
             number of observations as `y` and should be aligned so that y[i] is
             regressed on exog[i].
@@ -229,7 +247,7 @@ class ForecasterAutoreg():
         
         '''
         
-        if exog is not None and exog.shape[0] != len(y):
+        if exog is not None and len(exog) != len(y):
             raise Exception(
                 "`exog` must have same number of samples as `y`."
             )
@@ -239,12 +257,20 @@ class ForecasterAutoreg():
         if exog is not None:
             # The first `self.max_lag` positions of exog must be removed
             # since they are not in X_train.
-            X_train = np.column_stack((X_train, exog[self.max_lag:, ]))
+            X_train = pd.concat(
+                        [X_train, exog.iloc[self.max_lag:, ]],
+                        axis = 1,
+                        join = 'inner'
+                      )
                         
         return X_train, y_train
 
         
-    def fit(self, y: pd.Series, exog: Union[pd.Series, pd.DataFrame]=None) -> None:
+    def fit(
+        self,
+        y: pd.Series,
+        exog: Union[pd.Series, pd.DataFrame]=None
+    ) -> None:
         '''
         Training Forecaster.
         
@@ -272,7 +298,7 @@ class ForecasterAutoreg():
         self.last_window          = None
         self.included_exog        = False
         self.exog_type            = None
-        self.exog_shape           = None
+        self.exog_col_names       = None
         self.in_sample_residuals  = None
         self.out_sample_residuals = None
         self.fitted               = False
@@ -280,27 +306,25 @@ class ForecasterAutoreg():
         
         
         self._check_y(y=y)
-        y_values, y_index = self._preproces_y(y=y)
-        self.y_index_type = type(y_index)
-        self.training_range = y_index[[0, -1]]
-        if isinstance(y_index, pd.DatetimeIndex):
-            self.y_index_freq = y_index.freq
+        y = self._preproces_y(y=y)
+        self.y_index_type = type(y.index)
+        self.training_range = y.index[[0, -1]]
+        if isinstance(y.index, pd.DatetimeIndex):
+            self.y_index_freq = y.index.freqstr
         else: 
-            self.y_index_freq = y_index.step
+            self.y_index_freq = y.index.step
         
         if exog is not None:
-            self._check_exog(exog=exog)
-            self.exog_type = type(exog)
-            exog = self._preproces_exog(exog=exog)
-            self.included_exog = True
-            self.exog_shape = exog.shape
-            
-            if exog.shape[0] != len(y):
+            if len(exog) != len(y):
                 raise Exception(
                     "`exog` must have same number of samples as `y`."
                 )
-                
-        
+            self._check_exog(exog=exog)
+            self.exog_type = type(exog)
+            self.included_exog = True
+            if isinstance(exog, pd.DataFrame):
+                self.exog_col_names = exog.columns.to_list()
+                            
         X_train, y_train = self._create_train_X_y(y=y, exog=exog)
         
         self.regressor.fit(X=X_train, y=y_train)
@@ -314,12 +338,11 @@ class ForecasterAutoreg():
         
         # The last window of training data is stored so that lags needed as
         # predictors in the first iteration of `predict()` can be calculated.
-        self.last_window = y_train[-self.max_lag:].copy()
-        self.last_window_index = y_index[-self.max_lag:].copy()
+        self.last_window = y_train.iloc[-self.max_lag:].copy()
             
             
-    def predict(self, steps: int, last_window: Union[np.ndarray, pd.Series]=None,
-                exog: Union[np.ndarray, pd.Series, pd.DataFrame]=None) -> pd.Series:
+    def predict(self, steps: int, last_window: pd.Series=None,
+                exog: Union[pd.Series, pd.DataFrame]=None) -> pd.Series:
         '''
         Predict n steps ahead. It is an iterative process in which, each prediction,
         is used as a predictor for the next step.
@@ -329,7 +352,7 @@ class ForecasterAutoreg():
         steps : int
             Number of future steps predicted.
             
-        last_window : 1D np.ndarray, pd.Series, shape (, max_lag), default `None`
+        last_window : pd.Series, default `None`
             Values of the series used to create the predictors (lags) need in the 
             first iteration of predictiont (t + 1).
     
@@ -337,7 +360,7 @@ class ForecasterAutoreg():
             used to calculate the initial predictors, and the predictions start
             right after training data.
             
-        exog : np.ndarray, pd.Series, pd.DataFrame, default `None`
+        exog : pd.Series, pd.DataFrame, default `None`
             Exogenous variable/s included as predictor/s.
 
         Returns 
@@ -371,48 +394,54 @@ class ForecasterAutoreg():
             )
         
         if exog is not None:
-            self._check_exog(
-                exog=exog, ref_type=self.exog_type, ref_shape=self.exog_shape
-            )
-            exog = self._preproces_exog(exog=exog)
-            if exog.shape[0] < steps:
+            if len(exog) < steps:
                 raise Exception(
                     '`exog` must have at least as many values as `steps` predicted.'
                 )
+            self._check_exog(
+                exog = exog,
+                ref_type = self.exog_type,
+                ref_shape = self.exog_col_names
+            )
+            exog = self._preproces_exog(exog=exog)
+            
      
         if last_window is not None:
-            self._check_last_window(last_window=last_window)
-            last_window_index = self._get_index(y=last_window)
-            last_window = self._preproces_last_window(last_window=last_window)
-            if last_window.shape[0] < self.max_lag:
+            if len(last_window) < self.max_lag:
                 raise Exception(
                     f"`last_window` must have as many values as as needed to "
                     f"calculate the maximum lag ({self.max_lag})."
                 )
+            self._check_last_window(last_window=last_window)
+            last_window = self._preproces_last_window(last_window=last_window)
+            
         else:
-            last_window = self.last_window.copy()
-            last_window_index = self.last_window_index.copy()
+            last_window = self.last_window
             
         predictions = np.full(shape=steps, fill_value=np.nan)
+        last_window_values = last_window.to_numpy()
 
         for i in range(steps):
-            X = last_window[-self.lags].reshape(1, -1)
+            X = last_window_values[-self.lags].reshape(1, -1)
             if exog is None:
                 prediction = self.regressor.predict(X)
             else:
                 prediction = self.regressor.predict(
-                                np.column_stack((X, exog[i, ].reshape(1, -1)))
+                                np.column_stack([
+                                    X,
+                                    exog[i, ].to_numpy().reshape(1, -1)
+                                ])
                              )
             predictions[i] = prediction.ravel()[0]
 
-            # Update `last_window` values. The first position is discarted and 
+            # Update `last_window_values`. The first position is discarted and 
             # the new prediction is added at the end.
-            last_window = np.append(last_window[1:], prediction)
+            last_window_values = np.append(last_window_values[1:], prediction)
             
         
         predictions = pd.Series(
                         data  = predictions,
-                        index = self._expand_index(index=last_window_index, steps=steps),
+                        index = self._expand_index(index=last_window.index, steps=steps),
                         name  = 'pred'
                       )
 
@@ -420,8 +449,8 @@ class ForecasterAutoreg():
     
     
     def _estimate_boot_interval(self, steps: int,
-                                last_window: Union[np.ndarray, pd.Series]=None,
-                                exog: Union[np.ndarray, pd.Series, pd.DataFrame]=None,
+                                last_window: np.ndarray=None,
+                                exog: np.ndarray=None,
                                 interval: list=[5, 95], n_boot: int=500,
                                 in_sample_residuals: bool=True) -> pd.DataFrame:
         '''
@@ -435,7 +464,7 @@ class ForecasterAutoreg():
         steps : int
             Number of future steps predicted.
             
-        last_window : 1D np.ndarray, pd.Series, shape (, max_lag), default `None`
+        last_window : 1D np.ndarray, default `None`
             Values of the series used to create the predictors (lags) need in the 
             first iteration of predictiont (t + 1).
     
@@ -443,7 +472,7 @@ class ForecasterAutoreg():
             used to calculate the initial predictors, and the predictions start
             right after training data.
             
-        exog : np.ndarray, pd.Series, pd.DataFrame, default `None`
+        exog : np.ndarray, default `None`
             Exogenous variable/s included as predictor/s.
             
         n_boot: int, default `100`
@@ -514,17 +543,13 @@ class ForecasterAutoreg():
                 )
 
         if last_window is not None:
-            self._check_last_window(last_window=last_window)
-            last_window_index = self._get_index(y=last_window)
-            last_window = self._preproces_last_window(last_window=last_window)
-            if last_window.shape[0] < self.max_lag:
+            if len(last_window) < self.max_lag:
                 raise Exception(
                     f"`last_window` must have as many values as as needed to "
                     f"calculate the maximum lag ({self.max_lag})."
                 )
         else:
             last_window = self.last_window.copy()
-            last_window_index = self.last_window_index.copy()
 
         boot_predictions = np.full(
                                 shape      = (steps, n_boot),
@@ -573,16 +598,15 @@ class ForecasterAutoreg():
                             
         prediction_interval = np.percentile(boot_predictions, q=interval, axis=1).transpose()
         prediction_interval = pd.DataFrame(
-                                data    = prediction_interval,
-                                columns = ['lower_bound', 'upper_bound'],
-                                index   = self._expand_index(index=last_window_index, steps=steps)
+                                data = prediction_interval,
+                                columns = ['lower_bound', 'upper_bound']
                               )
         
         return prediction_interval
     
         
-    def predict_interval(self, steps: int, last_window: Union[np.ndarray, pd.Series]=None,
-                         exog: Union[np.ndarray, pd.Series, pd.DataFrame]=None,
+    def predict_interval(self, steps: int, last_window: pd.Series=None,
+                         exog: Union[pd.Series, pd.DataFrame]=None,
                          interval: list=[5, 95], n_boot: int=500,
                          in_sample_residuals: bool=True) -> pd.DataFrame:
         '''
@@ -595,7 +619,7 @@ class ForecasterAutoreg():
         steps : int
             Number of future steps predicted.
             
-        last_window : 1D np.ndarray, pd.Series, shape (, max_lag), default `None`
+        last_window : pd.Series, shape (, max_lag), default `None`
             Values of the series used to create the predictors (lags) need in the 
             first iteration of predictiont (t + 1).
     
@@ -603,7 +627,7 @@ class ForecasterAutoreg():
             used to calculate the initial predictors, and the predictions start
             right after training data.
             
-        exog : np.ndarray, pd.Series, pd.DataFrame, default `None`
+        exog : pd.Series, pd.DataFrame, default `None`
             Exogenous variable/s included as predictor/s.
             
         interval: list, default `[5, 100]`
@@ -674,21 +698,21 @@ class ForecasterAutoreg():
                 )
      
         if last_window is not None:
-            self._check_last_window(last_window=last_window)
-            last_window_index = self._get_index(y=last_window)
-            last_window = self._preproces_last_window(last_window=last_window)
-            if last_window.shape[0] < self.max_lag:
+            if len(last_window) < self.max_lag:
                 raise Exception(
                     f"`last_window` must have as many values as as needed to "
                     f"calculate the maximum lag ({self.max_lag})."
                 )
+            self._check_last_window(last_window=last_window)
+            last_window_values, last_window_index = self._preproces_last_window(last_window=last_window)
+            
         else:
-            last_window = self.last_window.copy()
-            last_window_index = self.last_window_index.copy()
+            last_window_values = self.last_window
+            last_window_index  = self.last_window_index
         
         # Since during predict() `last_window` and `exog` are modified, the
         # originals are stored to be used later
-        last_window_original = last_window.copy()
+        last_window_original = pd.Series(last_window_values, index=last_window_index)
         if exog is not None:
             exog_original = exog.copy()
         else:
@@ -722,7 +746,6 @@ class ForecasterAutoreg():
         If `y` index is of type DatetimeIndex without a frequancy, a warning is
         displayed.
         
-        
         Parameters
         ----------        
         y : Any
@@ -755,7 +778,6 @@ class ForecasterAutoreg():
         missing values. If `y` index is of type DatetimeIndex without a frequancy,
         a warning is displayed.
         
-        
         Parameters
         ----------        
         last_window : Any
@@ -770,10 +792,10 @@ class ForecasterAutoreg():
         if not isinstance(last_window, pd.Series):
             raise Exception('`last_window` must be a pandas Series.')
                 
-        if y.isnull().any():
+        if last_window.isnull().any():
             raise Exception('`last_window` has missing values.')
         
-        if isinstance(last_window.index, pd.DatetimeIndex) and last_window.freq is None:
+        if isinstance(last_window.index, pd.DatetimeIndex) and last_window.index.freq is None:
             warnings.warn(
                 ('`last_window` has DatetimeIndex index but no frequency. The '
                  'index will be overwrite with a RangeIndex.')
@@ -783,47 +805,65 @@ class ForecasterAutoreg():
         
         
     @staticmethod
-    def _check_exog(exog: Any, ref_type: type=None, ref_shape: tuple=None) -> None:
+    def _check_exog(
+        exog: Any,
+        ref_type: type=None,
+        ref_col_names: list=None
+    ) -> None:
         '''
-        Raise Exception if `exog` is not `np.ndarray`, `pd.Series` or `pd.DataFrame`.
-        If `ref_shape` is provided, raise Exception if `ref_shape[1]` do not match
-        `exog.shape[1]` (number of columns).
+        Raise Exception if `exog` is not pd.Series or pd.DataFrame, if `exog`
+        type does not match `ref_type` or if `exog` does not have the columns in
+        `ref_col_names`.
         
         Parameters
         ----------        
         exog : np.ndarray, pd.Series, pd.DataFrame
             Exogenous variable/s included as predictor/s.
 
-        exog_type : type, default `None`
+        ref_type : type, default `None`
             Type of reference for exog.
             
-        exog_shape : tuple, default `None`
+        ref_col_names : list, default `None`
             Shape of reference for exog.
         '''
             
         if not isinstance(exog, (pd.Series, pd.DataFrame)):
             raise Exception('`exog` must be `pd.Series` or `pd.DataFrame`.')
                     
-        if ref_type == pd.DataFrame:
-            if ref_shape[1] != exog.shape[1]:
+        if ref_type is not None and type(exog) != ref_type:
+            raise Exception(
+                f"Expected type of `exog` is {ref_type}. Got {type(exog)}."
+            )
+            
+        if ref_col_names is not None and isinstance(exog, pd.DataFrame):
+            missing_cols = set(exog.columns).difference(set(ref_col_names))
+            if missing_cols:
                 raise Exception(
-                    f"`exog` must have {ref_shape[1]} columns. "
-                    f"Got `pd.DataFrame` with {exog.shape[1]} columns."
+                    f"Missing columns in `exog` : {missing_cols}."
                 )
         return
     
-    
+
     @staticmethod
-    def _preproces_y(y: pd.Series) -> Tuple[np.ndarray, pd.Index]:
+    def _check_aligment_y_exog(
+        y: pd.Series,
+        exog: Union[pd.Series, pd.DataFrame]
+    ) -> None:
+
+        '''
+        ''' 
+    
+
+    @staticmethod
+    def _preproces_y(y: pd.Series) -> pd.Series:
         
         '''
-        Transforms `y` into 1D np.ndarray, create the corresponding index.
-        
-        If `y` index is not of type DatetimeIndex, a RangeIndex is created.
-        If `y` index is of type DatetimeIndex and has frequency, its index is
-        returned.
-        If `y` index is of type DatetimeIndex and but has no frequency, a
-        RangeIndex is created.
+        Overwrite pandas index according to the next rules:
+            If index is not of type DatetimeIndex, a RangeIndex is created.
+            If index is of type DatetimeIndex and but has no frequency, a
+            RangeIndex is created.
+            If index is of type DatetimeIndex and has frequency, nothing is
+            changed.
         
         Parameters
         ----------        
@@ -832,66 +872,58 @@ class ForecasterAutoreg():
 
         Returns 
         -------
-        y_array: np.ndarray, shape(samples,)
-            Numpy array representation of `y`.
-            
-        y_index: pd.index
-            Index of `y`.
+        y_out : pd.Series
+            Time series values with proper index.
         '''
-        
-        y_array = y.to_numpy()
         
         if isinstance(y.index, pd.DatetimeIndex) and y.index.freq is not None:
-            y_index = y.index
+            y_out = y
         else:
-            y_index = pd.RangeIndex(
-                        start = 0,
-                        stop  = len(y),
-                        step  = 1
-                      )
-            
-        return y_array, y_index
-        
-        
+            y_out = y.copy()
+            y_out.index = pd.RangeIndex(
+                            start = 0,
+                            stop  = len(y),
+                            step  = 1
+                          )
+             
+        return y_out
+
     @staticmethod
-    def _preproces_last_window(last_window: pd.Series) -> Tuple[np.ndarray, pd.Index]:
+    def _preproces_exog(
+        exog: Union[pd.Series, pd.DataFrame]
+    ) -> Union[pd.Series, pd.DataFrame]:
         
         '''
-        Transforms `last_window` into 1D np.ndarray, create the corresponding index.
-        
-        If `last_window` index is not of type DatetimeIndex, a RangeIndex is created.
-        If `last_window` index is of type DatetimeIndex and has frequency, its index is
-        returned.
-        If `last_window` index is of type DatetimeIndex and but has no frequency, a
-        RangeIndex is created.
+        Overwrite pandas index according to the next rules:
+            If index is not of type DatetimeIndex, a RangeIndex is created.
+            If index is of type DatetimeIndex and but has no frequency, a
+            RangeIndex is created.
+            If index is of type DatetimeIndex and has frequency, nothing is
+            changed.
         
         Parameters
         ----------        
-       last_window : pd.Series
-            Time series values
+        exog : pd.Series, pd.DataFrame
+            Exogenous variables
 
         Returns 
         -------
-        last_window_array: np.ndarray, shape(samples,)
-            Numpy array representation of `last_window`.
-            
-        last_window_index: pd.index
-            Index of `last_window`.
+        exog_out : pd.Series, pd.DataFrame
+            Exogenous variables with proper index.
         '''
         
-        last_window_array = last_window.to_numpy()
-        
-        if isinstance(last_window.index, pd.DatetimeIndex) and last_window.index.freq is not None:
-            last_window_index = last_window.index
+        if isinstance(exog.index, pd.DatetimeIndex) and exog.index.freq is not None:
+            exog_out = exog
         else:
-            last_window_index = pd.RangeIndex(
-                                    start = 0,
-                                    stop  = len(y),
-                                    step  = 1
-                                )
-            
-        return last_window_array, last_window_index
-    
+            exog_out = exog.copy()
+            exog_out.index = pd.RangeIndex(
+                            start = 0,
+                            stop  = len(exog),
+                            step  = 1
+                          )
+             
+        return exog_out
+       
     @staticmethod
     def _expand_index(index: Union[pd.Index, None], steps: int) -> pd.Index:
         
@@ -929,36 +961,6 @@ class ForecasterAutoreg():
                             stop  = steps
                          )
         return new_index
-    
-    
-    
-        
-        
-    @staticmethod
-    def _preproces_exog(exog: Union[np.ndarray, pd.Series, pd.DataFrame]) -> np.ndarray:
-        
-        '''
-        Transforms `exog` to `np.ndarray` if it is `pd.Series` or `pd.DataFrame`.
-        If 1D `np.ndarray` reshape it to (n_samples, 1)
-        
-        Parameters
-        ----------        
-        exog : np.ndarray, pd.Series, pd.DataFrame
-            Time series values
-
-        Returns 
-        -------
-        exog: np.ndarray, shape(samples,)
-        '''
-        
-        if isinstance(exog, pd.Series):
-            exog = exog.to_numpy(copy=True).reshape(-1, 1)
-        elif isinstance(exog, np.ndarray) and exog.ndim == 1:
-            exog = exog.reshape(-1, 1)
-        elif isinstance(exog, pd.DataFrame):
-            exog = exog.to_numpy(copy=True)
-            
-        return exog
     
     
     def set_params(self, **params: dict) -> None:
