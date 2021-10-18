@@ -158,10 +158,11 @@ class ForecasterAutoreg():
         return info
     
     
-    def _create_lags(self, y: pd.Series) -> Tuple[np.ndarray, np.ndarray]:
+    def _create_lags(self, y: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
         '''       
-        Transforms a pandas Series into a 2D array (lags) and a 1D array (`y`).
-        Each value of `y` is associated with the lags that precede it.
+        Transforms a pandas Series into a 2D array (X) and a 1D array (y).
+        Each value of y is associated with row in X that representsthe lags
+        that precede it.
         
         Notice that, the returned matrix X_data, contains the lag 1 in the first
         column, the lag 2 in the second column and so on.
@@ -173,20 +174,14 @@ class ForecasterAutoreg():
 
         Returns 
         -------
-        X_data : 2D np.ndarray, shape (samples, len(self.lags))
-            2D array with the lag values (predictors).
+        X_data : pd.DataFrame, shape (samples, len(self.lags))
+            Pandas dataframe with the lag values (predictors).
         
-        y_data : 1D np.ndarray, shape (samples - max(self.lags), )
-            Values of the time series related to each row of `X_data`.
+        y_data : pd.Series, shape (samples - max(self.lags), )
+            Pandas series with the target values.
             
         '''
-        
-        if self.max_lag > len(y):
-            raise Exception(
-                f"Maximum lag can't be higher than `y` length. "
-                f"Got maximum lag={self.max_lag} and `y` length={len(y)}."
-            )
-        
+
         n_splits = len(y) - self.max_lag
         X_data = pd.DataFrame(
                     data = np.full(
@@ -222,7 +217,7 @@ class ForecasterAutoreg():
         self,
         y: pd.Series,
         exog: Union[pd.Series, pd.DataFrame]=None
-    ) -> Tuple[np.array, np.array]:
+    ) -> Tuple[pd.DataFrame, pd.Series]:
         '''
         Create training matrices X, y from univariante time series.
         
@@ -239,18 +234,13 @@ class ForecasterAutoreg():
 
         Returns 
         -------
-        X_train : 2D np.ndarray, shape (len(y) - self.max_lag, len(self.lags))
-            2D array with the training values (predictors).
-            
-        y_train : 1D np.ndarray, shape (len(y) - self.max_lag,)
-            Values (target) of the time series related to each row of `X_train`.
+        X_train : pd.DataFrame, shape (samples, len(self.lags))
+            Pandas dataframe with the lag values (predictors).
+        
+        y_train : pd.Series, shape (samples - max(self.lags), )
+            Pandas series with the target values.
         
         '''
-        
-        if exog is not None and len(exog) != len(y):
-            raise Exception(
-                "`exog` must have same number of samples as `y`."
-            )
                 
         X_train, y_train = self._create_lags(y=y)
     
@@ -320,11 +310,13 @@ class ForecasterAutoreg():
                     "`exog` must have same number of samples as `y`."
                 )
             self._check_exog(exog=exog)
+            exog = self._preproces_exog(exog=exog)
             self.exog_type = type(exog)
             self.included_exog = True
             if isinstance(exog, pd.DataFrame):
                 self.exog_col_names = exog.columns.to_list()
-                            
+
+        self._check_aligment_y_exog(y=y, exog=exog)                 
         X_train, y_train = self._create_train_X_y(y=y, exog=exog)
         
         self.regressor.fit(X=X_train, y=y_train)
@@ -341,8 +333,12 @@ class ForecasterAutoreg():
         self.last_window = y_train.iloc[-self.max_lag:].copy()
             
             
-    def predict(self, steps: int, last_window: pd.Series=None,
-                exog: Union[pd.Series, pd.DataFrame]=None) -> pd.Series:
+    def predict(
+        self,
+        steps: int,
+        last_window: pd.Series=None,
+        exog: Union[pd.Series, pd.DataFrame]=None
+    ) -> pd.Series:
         '''
         Predict n steps ahead. It is an iterative process in which, each prediction,
         is used as a predictor for the next step.
@@ -366,7 +362,7 @@ class ForecasterAutoreg():
         Returns 
         -------
         predictions : pd.Series
-            Values predicted.
+            Predicted values.
             
         '''
 
@@ -413,46 +409,46 @@ class ForecasterAutoreg():
                     f"calculate the maximum lag ({self.max_lag})."
                 )
             self._check_last_window(last_window=last_window)
-            last_window = self._preproces_last_window(last_window=last_window)
+            last_window = self._preproces_y(y=last_window)
             
         else:
             last_window = self.last_window
-            
-        predictions = np.full(shape=steps, fill_value=np.nan)
-        last_window_values = last_window.to_numpy()
 
+        predictions = pd.Series(
+                        data = np.full(shape=steps, fill_value=np.nan),
+                        index = self._expand_index(
+                                    index = last_window.index,
+                                    steps = steps
+                                ),
+                        name = 'pred'
+                      )  
+
+        last_window_values = last_window.to_numpy()
         for i in range(steps):
-            X = last_window_values[-self.lags].reshape(1, -1)
-            if exog is None:
-                prediction = self.regressor.predict(X)
-            else:
-                prediction = self.regressor.predict(
-                                np.column_stack([
-                                    X,
-                                    exog[i, ].to_numpy().reshape(1, -1)
-                                ])
-                             )
-            predictions[i] = prediction.ravel()[0]
+            X = last_window_values[-self.lags].reshape(1, -1) 
+            if exog is not None:
+                X = np.column_stack([X, exog[i, ].to_numpy().reshape(1, -1)])
+
+            prediction = self.regressor.predict(X)
+            
+            predictions.iloc[i] = prediction.ravel()[0]
 
             # Update `last_window_values`. The first position is discarted and 
             # the new prediction is added at the end.
             last_window_values = np.append(last_window_values[1:], prediction)
-            
-        
-        predictions = pd.Series(
-                        data  = predictions,
-                        index = self._expand_index(index=last_window.index, steps=steps),
-                        name  = 'pred'
-                      )
 
         return predictions
     
     
-    def _estimate_boot_interval(self, steps: int,
-                                last_window: np.ndarray=None,
-                                exog: np.ndarray=None,
-                                interval: list=[5, 95], n_boot: int=500,
-                                in_sample_residuals: bool=True) -> pd.DataFrame:
+    def _estimate_boot_interval(
+        self,
+        steps: int,
+        last_window: pd.Series=None,
+        exog: Union[pd.Series, pd.DataFrame]=None,
+        interval: list=[5, 95],
+        n_boot: int=500,
+        in_sample_residuals: bool=True
+    ) -> pd.DataFrame:
         '''
         Iterative process in which, each prediction, is used as a predictor
         for the next step and bootstrapping is used to estimate prediction
@@ -464,7 +460,7 @@ class ForecasterAutoreg():
         steps : int
             Number of future steps predicted.
             
-        last_window : 1D np.ndarray, default `None`
+        last_window : pd.Series, default `None`
             Values of the series used to create the predictors (lags) need in the 
             first iteration of predictiont (t + 1).
     
@@ -472,7 +468,7 @@ class ForecasterAutoreg():
             used to calculate the initial predictors, and the predictions start
             right after training data.
             
-        exog : np.ndarray, default `None`
+        exog : pd.Series, pd.DataFrame, default `None`
             Exogenous variable/s included as predictor/s.
             
         n_boot: int, default `100`
@@ -506,50 +502,6 @@ class ForecasterAutoreg():
         George Athanasopoulos.
             
         '''
-        
-        if steps < 1:
-            raise Exception(
-                f"`steps` must be integer greater than 0. Got {steps}."
-            )
-            
-        if not in_sample_residuals and self.out_sample_residuals is None:
-            raise Exception(
-                ('out_sample_residuals is empty. In order to estimate prediction '
-                'intervals using out of sample residuals, the user shoud have '
-                'calculated and stored the residuals within the forecaster (see'
-                '`set_out_sample_residuals()`.')
-            )
-
-        if exog is None and self.included_exog:
-            raise Exception(
-                f"Forecaster trained with exogenous variable/s. "
-                f"Same variable/s must be provided in `predict()`."
-            )
-
-        if exog is not None and not self.included_exog:
-            raise Exception(
-                f"Forecaster trained without exogenous variable/s. "
-                f"`exog` must be `None` in `predict()`."
-            )
-
-        if exog is not None:
-            self._check_exog(
-                exog=exog, ref_type = self.exog_type, ref_shape=self.exog_shape
-            )
-            exog = self._preproces_exog(exog=exog)
-            if exog.shape[0] < steps:
-                raise Exception(
-                    f"`exog` must have at least as many values as `steps` predicted."
-                )
-
-        if last_window is not None:
-            if len(last_window) < self.max_lag:
-                raise Exception(
-                    f"`last_window` must have as many values as as needed to "
-                    f"calculate the maximum lag ({self.max_lag})."
-                )
-        else:
-            last_window = self.last_window.copy()
 
         boot_predictions = np.full(
                                 shape      = (steps, n_boot),
@@ -584,31 +536,43 @@ class ForecasterAutoreg():
                                 last_window = last_window_boot,
                                 exog        = exog_boot
                              )
-                
                 prediction_with_residual  = prediction + sample_residuals[step]
                 boot_predictions[step, i] = prediction_with_residual
-
-                last_window_boot = np.append(
-                                    last_window_boot[1:],
+                last_window_boot = pd.concat([
+                                    last_window_boot.iloc[1:],
                                     prediction_with_residual
-                                   )
+                                   ])
                 
                 if exog is not None:
-                    exog_boot = exog_boot[1:]
+                    exog_boot = exog_boot.iloc[1:, ]
                             
-        prediction_interval = np.percentile(boot_predictions, q=interval, axis=1).transpose()
+        prediction_interval = np.percentile(
+                                boot_predictions,
+                                q=interval,
+                                axis=1
+                              ).transpose()
+
         prediction_interval = pd.DataFrame(
                                 data = prediction_interval,
-                                columns = ['lower_bound', 'upper_bound']
+                                columns = ['lower_bound', 'upper_bound'],
+                                index = self._expand_index(
+                                    index = last_window.index,
+                                    steps = steps
+                                )
                               )
         
         return prediction_interval
     
         
-    def predict_interval(self, steps: int, last_window: pd.Series=None,
-                         exog: Union[pd.Series, pd.DataFrame]=None,
-                         interval: list=[5, 95], n_boot: int=500,
-                         in_sample_residuals: bool=True) -> pd.DataFrame:
+    def predict_interval(
+        self,
+        steps: int,
+        last_window: pd.Series=None,
+        exog: Union[pd.Series, pd.DataFrame]=None,
+        interval: list=[5, 95],
+        n_boot: int=500,
+        in_sample_residuals: bool=True
+    ) -> pd.DataFrame:
         '''
         Iterative process in which, each prediction, is used as a predictor
         for the next step and bootstrapping is used to estimate prediction
@@ -619,7 +583,7 @@ class ForecasterAutoreg():
         steps : int
             Number of future steps predicted.
             
-        last_window : pd.Series, shape (, max_lag), default `None`
+        last_window : pd.Series, default `None`
             Values of the series used to create the predictors (lags) need in the 
             first iteration of predictiont (t + 1).
     
@@ -704,15 +668,14 @@ class ForecasterAutoreg():
                     f"calculate the maximum lag ({self.max_lag})."
                 )
             self._check_last_window(last_window=last_window)
-            last_window_values, last_window_index = self._preproces_last_window(last_window=last_window)
-            
+            last_window = self._preproces_y(y=last_window)
+
         else:
-            last_window_values = self.last_window
-            last_window_index  = self.last_window_index
+            last_window = self.last_window.copy()
         
         # Since during predict() `last_window` and `exog` are modified, the
         # originals are stored to be used later
-        last_window_original = pd.Series(last_window_values, index=last_window_index)
+        last_window_original = last_window.copy()
         if exog is not None:
             exog_original = exog.copy()
         else:
@@ -732,9 +695,8 @@ class ForecasterAutoreg():
                                     n_boot      = n_boot,
                                     in_sample_residuals = in_sample_residuals
                                 )
-        
+
         predictions = pd.concat((predictions, predictions_interval), axis=1)
-        predictions.index = self._expand_index(index=last_window_index, steps=steps)
         
         return predictions
 
@@ -817,7 +779,7 @@ class ForecasterAutoreg():
         
         Parameters
         ----------        
-        exog : np.ndarray, pd.Series, pd.DataFrame
+        exog :  pd.Series, pd.DataFrame
             Exogenous variable/s included as predictor/s.
 
         ref_type : type, default `None`
@@ -847,12 +809,26 @@ class ForecasterAutoreg():
     @staticmethod
     def _check_aligment_y_exog(
         y: pd.Series,
-        exog: Union[pd.Series, pd.DataFrame]
+        exog: Union[pd.Series, pd.DataFrame]=None
     ) -> None:
 
         '''
+        Raise Exception if `y` and `exog` do not have aligned indexes.
+
+        Parameters
+        ---------- 
+        y : pd.Series
+            Time series values
+
+        exog : pd.Series, pd.DataFrame
+            Exogenous variable/s included as predictor/s.
         ''' 
-    
+
+        if exog is not None and  not (exog.index[:len(y)] == y.index).all():
+            raise Exception(
+               ('`y` and `exog` must have same index. This is important '
+               'to ensure the correct aligment of values.')      
+            )
 
     @staticmethod
     def _preproces_y(y: pd.Series) -> pd.Series:
