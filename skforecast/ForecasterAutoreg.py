@@ -148,7 +148,8 @@ class ForecasterAutoreg():
             f"Regressor: {self.regressor} \n"
             f"Lags: {self.lags} \n"
             f"Window size: {self.window_size} \n"
-            f"Exogenous variable: {self.included_exog}, {self.exog_type} \n"
+            f"Included exogenous: {self.included_exog}, {self.exog_type if self.included_exog else ''} \n"
+            f"Exogenous variables names: {self.exog_col_names} \n"
             f"Training range: {self.training_range.to_list()} \n"
             f"Training index type: {str(self.y_index_type)} \n"
             f"Training index frequancy: {self.y_index_freq} \n"
@@ -213,7 +214,7 @@ class ForecasterAutoreg():
         return X_data, y_data
 
 
-    def _create_train_X_y(
+    def create_train_X_y(
         self,
         y: pd.Series,
         exog: Union[pd.Series, pd.DataFrame]=None
@@ -241,7 +242,20 @@ class ForecasterAutoreg():
             Pandas series with the target values.
         
         '''
-                
+
+        self._check_y(y=y)
+        y = self._preproces_y(y=y)
+
+        if exog is not None:
+            if len(exog) != len(y):
+                raise Exception(
+                    "`exog` must have same number of samples as `y`."
+                )
+            self._check_exog(exog=exog)
+            exog = self._preproces_exog(exog=exog)
+        
+        self._check_aligment_y_exog(y=y, exog=exog)
+
         X_train, y_train = self._create_lags(y=y)
     
         if exog is not None:
@@ -317,7 +331,7 @@ class ForecasterAutoreg():
                 self.exog_col_names = exog.columns.to_list()
 
         self._check_aligment_y_exog(y=y, exog=exog)                 
-        X_train, y_train = self._create_train_X_y(y=y, exog=exog)
+        X_train, y_train = self.create_train_X_y(y=y, exog=exog)
         
         self.regressor.fit(X=X_train, y=y_train)
         self.fitted = True            
